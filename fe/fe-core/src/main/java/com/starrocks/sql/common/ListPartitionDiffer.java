@@ -26,9 +26,12 @@ import com.starrocks.connector.PartitionUtil;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
+import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 import static com.starrocks.sql.optimizer.OptimizerTraceUtil.logMVPrepare;
 
@@ -44,11 +47,14 @@ public final class ListPartitionDiffer extends PartitionDiffer {
      * @return the list partition diff between the base table and the mv
      */
     public static ListPartitionDiff getListPartitionDiff(Map<String, PListCell> baseItems,
-                                                         Map<String, PListCell> mvItems) {
+                                                         Map<String, PListCell> mvItems, Integer partitionTTLNumber) {
         // This synchronization method has a one-to-one correspondence
         // between the base table and the partition of the mv.
         Map<String, PListCell> adds = diffList(baseItems, mvItems);
         Map<String, PListCell> deletes = diffList(mvItems, baseItems);
+        if (partitionTTLNumber > 0) {
+            adds = diffList(filterPartitionsByNumber(baseItems, partitionTTLNumber), diffList(mvItems, deletes));
+        }
         return new ListPartitionDiff(adds, deletes);
     }
 
@@ -71,6 +77,36 @@ public final class ListPartitionDiffer extends PartitionDiffer {
             result.put(key, srcEntry.getValue());
         }
         return result;
+    }
+
+    /** filter partitions from all base partitions by ttl number when ttl > 0
+     * @param inputPartitions
+     * @param filterNumber
+     * @return
+     */
+    private static Map<String, PListCell> filterPartitionsByNumber(Map<String, PListCell> inputPartitions,
+                                                                   int filterNumber) {
+        if (filterNumber <= 0 || filterNumber >= inputPartitions.size()) {
+            return inputPartitions;
+        }
+        LinkedHashMap<String, PListCell> sortedPartition = inputPartitions.entrySet().stream()
+            .sorted((e1, e2) -> e2.getValue().compareTo(e1.getValue())) // reverse order(max heap)
+            .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue, (e1, e2) -> e1, LinkedHashMap::new));
+        Iterator<Map.Entry<String, PListCell>> iter = sortedPartition.entrySet().iterator();
+
+        Map<String, PListCell> outputPartitions = new LinkedHashMap<>();
+
+        // iterate partition_ttl_number times
+        for (int i = 0; i < filterNumber; i++) {
+            if (iter.hasNext()) {
+                Map.Entry<String, PListCell> entry = iter.next();
+                outputPartitions.put(entry.getKey(), entry.getValue());
+            } else {
+                break;
+            }
+        }
+
+        return outputPartitions;
     }
 
     /**
@@ -279,7 +315,7 @@ public final class ListPartitionDiffer extends PartitionDiffer {
         // TODO: prune the partitions based on ttl
         Map<String, PListCell> mvPartitionNameToListMap = mv.getListPartitionItems();
         ListPartitionDiff diff = ListPartitionDiffer.getListPartitionDiff(
-                allBasePartitionItems, mvPartitionNameToListMap);
+            allBasePartitionItems, mvPartitionNameToListMap, mv.getTableProperty().getPartitionTTLNumber());
 
         // collect external partition column mapping
         Map<Table, Map<String, Set<String>>> externalPartitionMaps = Maps.newHashMap();
